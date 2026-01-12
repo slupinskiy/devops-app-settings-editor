@@ -1,0 +1,490 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Azure DevOps App Settings Editor</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body { 
+            background-color: #111827;
+            color: #f3f4f6;
+        }
+        .dragging {
+            opacity: 0.5;
+        }
+        .drag-over {
+            border-top: 3px solid #3b82f6;
+        }
+        .drag-handle {
+            cursor: move;
+            user-select: none;
+        }
+    </style>
+</head>
+<body class="min-h-screen bg-gray-900 text-gray-100 p-6">
+    <div class="max-w-7xl mx-auto">
+        <div class="mb-6">
+            <h1 class="text-3xl font-bold mb-2">Azure DevOps App Settings Editor</h1>
+            <p class="text-gray-400">
+                Edit your configuration blocks as key-value pairs, variable blocks, or flags - then copy back to Azure DevOps
+            </p>
+        </div>
+
+        <!-- Notification -->
+        <div id="notification" class="hidden mb-4 bg-green-600 text-white px-4 py-3 rounded">
+            <span id="notificationText"></span>
+        </div>
+
+        <!-- Toolbar -->
+        <div class="bg-gray-800 rounded-lg p-4 mb-6 flex flex-wrap gap-3">
+            <button onclick="switchMode('table')" id="btnTable" class="px-4 py-2 rounded bg-blue-600 text-white">
+                Table View
+            </button>
+            <button onclick="switchMode('text')" id="btnText" class="px-4 py-2 rounded bg-gray-700 text-gray-300 hover:bg-gray-600">
+                Text View
+            </button>
+            
+            <div class="border-l border-gray-600 mx-2"></div>
+            
+            <button onclick="addSetting()" id="btnAdd" class="px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded">
+                ➕ Add Setting
+            </button>
+            
+            <button onclick="addVariableBlock()" id="btnAddVar" class="px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded">
+                ➕ Add Variable Block
+            </button>
+            
+            <button onclick="copyToClipboard()" class="px-4 py-2 bg-purple-600 hover:bg-purple-700 text-white rounded">
+                📋 Copy to Clipboard
+            </button>
+
+            <label class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded cursor-pointer">
+                📤 Import from File
+                <input type="file" id="fileInput" accept=".txt" onchange="importFile()" class="hidden">
+            </label>
+
+            <button onclick="exportFile()" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded">
+                💾 Export to File
+            </button>
+        </div>
+
+        <!-- Table View -->
+        <div id="tableView" class="bg-gray-800 rounded-lg overflow-hidden">
+            <div class="overflow-x-auto">
+                <table class="w-full">
+                    <thead class="bg-gray-700">
+                        <tr>
+                            <th class="px-4 py-3 text-center text-sm font-semibold w-12">Order</th>
+                            <th class="px-4 py-3 text-left text-sm font-semibold">Key</th>
+                            <th class="px-4 py-3 text-left text-sm font-semibold">Value</th>
+                            <th class="px-4 py-3 text-center text-sm font-semibold w-24">Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="settingsTableBody">
+                        <!-- Rows will be inserted here -->
+                    </tbody>
+                </table>
+            </div>
+            
+            <div id="emptyState" class="text-center py-12 text-gray-400 hidden">
+                <p class="mb-4">No settings yet. Add one or paste your configuration string in Text View.</p>
+                <button onclick="addSetting()" class="px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded">
+                    Add First Setting
+                </button>
+            </div>
+
+            <div class="p-4 border-t border-gray-700">
+                <p class="text-sm text-gray-400 mb-2">
+                    <strong>Total settings:</strong> <span id="settingsCount">0</span>
+                </p>
+                <button onclick="switchMode('text')" class="text-sm text-blue-400 hover:text-blue-300">
+                    View as formatted string →
+                </button>
+            </div>
+        </div>
+
+        <!-- Text View -->
+        <div id="textView" class="bg-gray-800 rounded-lg p-4 hidden">
+            <div class="mb-4">
+                <label class="block text-sm font-semibold mb-2">
+                    Configuration String (Azure DevOps Format)
+                </label>
+                <textarea id="rawText" class="w-full h-64 bg-gray-900 border border-gray-600 rounded px-4 py-3 text-sm font-mono focus:border-blue-500 focus:outline-none resize-y" placeholder='Paste your configuration string here, e.g.: -Key1 "Value1" $(VariableBlock) -Key2 "Value2"'></textarea>
+            </div>
+            
+            <button onclick="parseFromText()" class="px-6 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded">
+                Parse to Table View
+            </button>
+            
+            <div class="mt-4 p-4 bg-gray-900 rounded border border-gray-700">
+                <h3 class="text-sm font-semibold mb-2 text-gray-300">Format Guide:</h3>
+                <code class="text-xs text-green-400 block mb-1">
+                    Key-Value Pairs: -KeyName "Value" -AnotherKey "$(VariableReference)"
+                </code>
+                <code class="text-xs text-amber-400 block mb-1">
+                    Variable Blocks: $(KeyLessVariablesAggregation) $(SharedSettings)
+                </code>
+                <p class="text-xs text-gray-500 mt-2">
+                    💡 Variable blocks expand to multiple settings from library groups
+                </p>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let settings = [];
+        let currentMode = 'table';
+
+        // Parse settings from string
+        function parseSettings(text) {
+            const pairs = [];
+            // Match standalone variable references like $(VariableName)
+            const standaloneVarRegex = /\$\(([^)]+)\)/g;
+            // Match key-value pairs (-Key "Value")
+            const kvpRegex = /-(\S+)\s+"([^"]*)"/g;
+            
+            // First, find all matches with their positions
+            const allMatches = [];
+            let match;
+            
+            // Find key-value pairs
+            while ((match = kvpRegex.exec(text)) !== null) {
+                allMatches.push({
+                    index: match.index,
+                    key: match[1],
+                    value: match[2],
+                    isStandaloneVar: false
+                });
+            }
+            
+            // Find standalone variable references
+            const kvpRanges = allMatches.map(m => {
+                // Find the end of this KVP (closing quote)
+                const startPos = m.index;
+                const keyPart = `-${m.key} "`;
+                const valueStart = startPos + keyPart.length;
+                const valueEnd = text.indexOf('"', valueStart);
+                return { start: startPos, end: valueEnd + 1 };
+            });
+            
+            while ((match = standaloneVarRegex.exec(text)) !== null) {
+                // Check if this variable is inside a KVP's quoted value
+                const isInsideKVP = kvpRanges.some(range => 
+                    match.index > range.start && match.index < range.end
+                );
+                
+                if (!isInsideKVP) {
+                    allMatches.push({
+                        index: match.index,
+                        key: '',
+                        value: match[1], // Store the variable name in value
+                        isStandaloneVar: true
+                    });
+                }
+            }
+            
+            // Sort by position in original text
+            allMatches.sort((a, b) => a.index - b.index);
+            
+            // Create settings objects
+            return allMatches.map(m => ({
+                key: m.key,
+                value: m.value,
+                isStandaloneVar: m.isStandaloneVar,
+                id: Math.random().toString(36).substr(2, 9)
+            }));
+        }
+
+        // Generate string from settings
+        function generateString() {
+            return settings.map(s => {
+                if (s.isStandaloneVar) {
+                    return `$(${s.value})`;
+                } else {
+                    return `-${s.key} "${s.value}"`;
+                }
+            }).join(' ');
+        }
+
+        // Switch between views
+        function switchMode(mode) {
+            currentMode = mode;
+            
+            if (mode === 'table') {
+                document.getElementById('tableView').classList.remove('hidden');
+                document.getElementById('textView').classList.add('hidden');
+                document.getElementById('btnTable').className = 'px-4 py-2 rounded bg-blue-600 text-white';
+                document.getElementById('btnText').className = 'px-4 py-2 rounded bg-gray-700 text-gray-300 hover:bg-gray-600';
+                document.getElementById('btnAdd').classList.remove('hidden');
+                document.getElementById('btnAddVar').classList.remove('hidden');
+                renderTable();
+            } else {
+                document.getElementById('tableView').classList.add('hidden');
+                document.getElementById('textView').classList.remove('hidden');
+                document.getElementById('btnTable').className = 'px-4 py-2 rounded bg-gray-700 text-gray-300 hover:bg-gray-600';
+                document.getElementById('btnText').className = 'px-4 py-2 rounded bg-blue-600 text-white';
+                document.getElementById('btnAdd').classList.add('hidden');
+                document.getElementById('btnAddVar').classList.add('hidden');
+                document.getElementById('rawText').value = generateString();
+            }
+        }
+
+        // Render table
+        function renderTable() {
+            const tbody = document.getElementById('settingsTableBody');
+            const emptyState = document.getElementById('emptyState');
+            
+            if (settings.length === 0) {
+                tbody.innerHTML = '';
+                emptyState.classList.remove('hidden');
+            } else {
+                emptyState.classList.add('hidden');
+                tbody.innerHTML = settings.map((setting, index) => `
+                    <tr class="${index % 2 === 0 ? 'bg-gray-800' : 'bg-gray-750'}" 
+                        data-id="${setting.id}"
+                        ondragover="handleDragOver(event)"
+                        ondrop="handleDrop(event)"
+                        ondragleave="handleDragLeave(event)">
+                        <td class="px-4 py-3 text-center">
+                            <span class="drag-handle text-gray-500 hover:text-gray-300 text-lg" 
+                                  draggable="true"
+                                  onmousedown="enableDrag(event)"
+                                  ondragstart="handleDragStart(event)"
+                                  ondragend="handleDragEnd(event)">⋮⋮</span>
+                        </td>
+                        <td class="px-4 py-3">
+                            ${setting.isStandaloneVar ?
+                                `<span class="text-gray-500 italic text-sm">Variable block</span>` :
+                                `<input type="text" value="${escapeHtml(setting.key)}" 
+                                       onchange="updateSetting('${setting.id}', 'key', this.value)"
+                                       class="w-full bg-gray-900 border border-gray-600 rounded px-3 py-2 text-sm focus:border-blue-500 focus:outline-none"
+                                       placeholder="SomeOtherConfig__PropertyName">`
+                            }
+                        </td>
+                        <td class="px-4 py-3">
+                            ${setting.isStandaloneVar ?
+                                `<div class="flex items-center gap-2">
+                                    <span class="text-amber-400 font-mono text-sm">$(${escapeHtml(setting.value)})</span>
+                                    <button onclick="convertToKVP('${setting.id}')" 
+                                            class="text-xs text-blue-400 hover:text-blue-300 px-2 py-1 bg-gray-700 rounded">
+                                        Convert to KVP
+                                    </button>
+                                </div>` :
+                                `<input type="text" value="${escapeHtml(setting.value)}" 
+                                       onchange="updateSetting('${setting.id}', 'value', this.value)"
+                                       class="w-full bg-gray-900 border border-gray-600 rounded px-3 py-2 text-sm focus:border-blue-500 focus:outline-none font-mono"
+                                       placeholder="$(SomeOtherConfig__PropertyName)">`
+                            }
+                        </td>
+                        <td class="px-4 py-3 text-center">
+                            <button onclick="deleteSetting('${setting.id}')" 
+                                    class="text-red-400 hover:text-red-300 p-2 rounded hover:bg-gray-700">
+                                🗑️
+                            </button>
+                        </td>
+                    </tr>
+                `).join('');
+            }
+            
+            document.getElementById('settingsCount').textContent = settings.length;
+        }
+
+        // Add setting
+        function addSetting() {
+            settings.push({
+                key: '',
+                value: '',
+                isStandaloneVar: false,
+                id: Math.random().toString(36).substr(2, 9)
+            });
+            renderTable();
+        }
+
+        // Add variable block
+        function addVariableBlock() {
+            settings.push({
+                key: '',
+                value: '',
+                isStandaloneVar: true,
+                id: Math.random().toString(36).substr(2, 9)
+            });
+            renderTable();
+        }
+
+        // Convert to KVP
+        function convertToKVP(id) {
+            const setting = settings.find(s => s.id === id);
+            if (setting) {
+                if (setting.isStandaloneVar) {
+                    // If converting from variable block, move value to key
+                    setting.key = setting.value;
+                    setting.value = '';
+                }
+                setting.isStandaloneVar = false;
+                renderTable();
+            }
+        }
+
+        // Update setting
+        function updateSetting(id, field, value) {
+            const setting = settings.find(s => s.id === id);
+            if (setting) {
+                setting[field] = value;
+            }
+        }
+
+        // Delete setting
+        function deleteSetting(id) {
+            settings = settings.filter(s => s.id !== id);
+            renderTable();
+        }
+
+        // Parse from text
+        function parseFromText() {
+            const text = document.getElementById('rawText').value;
+            settings = parseSettings(text);
+            switchMode('table');
+            showNotification(`Parsed ${settings.length} settings successfully!`);
+        }
+
+        // Copy to clipboard
+        function copyToClipboard() {
+            const text = currentMode === 'text' 
+                ? document.getElementById('rawText').value 
+                : generateString();
+            
+            navigator.clipboard.writeText(text).then(() => {
+                showNotification('Copied to clipboard!');
+            });
+        }
+
+        // Import from file
+        function importFile() {
+            const file = document.getElementById('fileInput').files[0];
+            if (file) {
+                const reader = new FileReader();
+                reader.onload = (e) => {
+                    const text = e.target.result;
+                    settings = parseSettings(text);
+                    renderTable();
+                    showNotification(`Imported ${settings.length} settings from file!`);
+                };
+                reader.readAsText(file);
+            }
+        }
+
+        // Export to file
+        function exportFile() {
+            const text = generateString();
+            const blob = new Blob([text], { type: 'text/plain' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = 'appsettings-config.txt';
+            a.click();
+            URL.revokeObjectURL(url);
+            showNotification('Exported to file!');
+        }
+
+        // Show notification
+        function showNotification(message) {
+            const notification = document.getElementById('notification');
+            const notificationText = document.getElementById('notificationText');
+            notificationText.textContent = message;
+            notification.classList.remove('hidden');
+            setTimeout(() => {
+                notification.classList.add('hidden');
+            }, 3000);
+        }
+
+        // Escape HTML
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        // Drag and drop handlers
+        let draggedElement = null;
+
+        function enableDrag(e) {
+            // Find the parent TR element
+            const row = e.target.closest('tr');
+            if (row) {
+                row.setAttribute('draggable', 'true');
+            }
+        }
+
+        function handleDragStart(e) {
+            // Find the parent TR element
+            const row = e.target.closest('tr');
+            draggedElement = row;
+            row.classList.add('dragging');
+            e.dataTransfer.effectAllowed = 'move';
+            e.dataTransfer.setData('text/html', row.innerHTML);
+        }
+
+        function handleDragEnd(e) {
+            const row = e.target.closest('tr');
+            if (row) {
+                row.classList.remove('dragging');
+                row.removeAttribute('draggable');
+            }
+            document.querySelectorAll('.drag-over').forEach(el => {
+                el.classList.remove('drag-over');
+            });
+        }
+
+        function handleDragOver(e) {
+            if (e.preventDefault) {
+                e.preventDefault();
+            }
+            e.dataTransfer.dropEffect = 'move';
+            
+            const target = e.currentTarget;
+            if (draggedElement !== target) {
+                target.classList.add('drag-over');
+            }
+            
+            return false;
+        }
+
+        function handleDragLeave(e) {
+            e.currentTarget.classList.remove('drag-over');
+        }
+
+        function handleDrop(e) {
+            if (e.stopPropagation) {
+                e.stopPropagation();
+            }
+            
+            const target = e.currentTarget;
+            target.classList.remove('drag-over');
+            
+            if (draggedElement !== target) {
+                const draggedId = draggedElement.getAttribute('data-id');
+                const targetId = target.getAttribute('data-id');
+                
+                const draggedIndex = settings.findIndex(s => s.id === draggedId);
+                const targetIndex = settings.findIndex(s => s.id === targetId);
+                
+                // Reorder array
+                const [removed] = settings.splice(draggedIndex, 1);
+                settings.splice(targetIndex, 0, removed);
+                
+                renderTable();
+            }
+            
+            return false;
+        }
+
+        // Initialize with example
+        window.onload = function() {
+            const example = `-ConfigRoot__Level1__0__PropertyName "$(ConfigRoot__Level1__0__PropertyName)" -ConfigRoot__Level1__PropertyName "$(ConfigRoot__Level1__PropertyName)" $(KeyLessVariablesAggregation) -SomeOtherConfig__PropertyName "$(SomeOtherConfig__PropertyName)"`;
+            settings = parseSettings(example);
+            renderTable();
+        };
+    </script>
+</body>
+</html>
